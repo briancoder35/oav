@@ -1,7 +1,8 @@
 {
   "type": "movie",
-  "name": "OnlyPorn: Eporner",
+  "name": "OAV: Eporner",
   "id": "eporner",
+  "posterShape": "landscape",
   "extra": [
     {
       "name": "search"
@@ -10,9 +11,5 @@
       "name": "skip"
     }
   ],
-  "extraSupported": [
-    "search",
-    "genre",
-    "skip"
-  ]
+  "extraSupported": ["search", "genre", "skip"]
 }

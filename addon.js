@@ -2,13 +2,12 @@ const { addonBuilder } = require('stremio-addon-sdk');
 const { loadProvider } = require('./provider');
 const packageInfo = require('./package.json');
 const { catalogs } = require('./catalog');
-const logger = require('./logger');
 
 const manifest = {
-  id: 'org.masterchief.onlyporn',
+  id: 'brian3596.onlyavideo',
   version: packageInfo.version,
 
-  name: 'OnlyPorn',
+  name: 'OnlyAVideo',
   description: packageInfo.description,
 
   icon: 'https://raw.githubusercontent.com/Mast3rCh1ef/addon-asset/main/op.png',
@@ -28,7 +27,7 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-builder.defineCatalogHandler(function (args, cb) {
+builder.defineCatalogHandler(function (args) {
   return loadProvider(args.id)
     .handleCatalog(args)
     .catch((reason) => console.error(reason));

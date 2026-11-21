@@ -1,0 +1,27 @@
+{
+  "type": "movie",
+  "name": "OAV: JAV Guru",
+  "id": "javguru",
+  "posterShape": "landscape",
+  "extra": [
+    {
+      "name": "search"
+    },
+    {
+      "name": "genre",
+      "options": [
+        "New release",
+        "Decensored",
+        "Amateur",
+        "Idol",
+        "FC2",
+        "4K",
+        "Popular Month"
+      ]
+    },
+    {
+      "name": "skip"
+    }
+  ],
+  "extraSupported": ["search", "genre", "skip"]
+}

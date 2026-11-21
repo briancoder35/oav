@@ -1,7 +1,8 @@
 {
   "type": "movie",
-  "name": "OnlyPorn: Xhamster",
+  "name": "OAV: Xhamster",
   "id": "xhamster",
+  "posterShape": "landscape",
   "extra": [
     {
       "name": "search"
@@ -11,16 +12,60 @@
       "options": [
         "Best (Daily)",
         "Best (Weekly)",
-        "Best (Monthly)"
+        "Best (Monthly)",
+        "4K",
+        "HD",
+        "Amateur",
+        "Mom",
+        "Close Up",
+        "Funny",
+        "JAV",
+        "Uncensored",
+        "Deep Throat",
+        "Face Fuck",
+        "Massage",
+        "Happy Ending",
+        "Gaping",
+        "Extreme Insertion",
+        "Interracial",
+        "PAWG",
+        "Pregnant",
+        "Lactating",
+        "Oiled",
+        "Cheating",
+        "Cuckold",
+        "Fantasy",
+        "Game",
+        "First Time",
+        "Glory Hole",
+        "Housewife",
+        "Naughty",
+        "Nympho",
+        "Taboo",
+        "Anal",
+        "Asian",
+        "Big Ass",
+        "Big Tits",
+        "Blowjob",
+        "Cartoon",
+        "Compilation",
+        "Creampie",
+        "Futanari",
+        "Hentai",
+        "Korean",
+        "Latina",
+        "MILF",
+        "POV",
+        "Public",
+        "Reality",
+        "School",
+        "Step Fantasy",
+        "Teen"
       ]
     },
     {
       "name": "skip"
     }
   ],
-  "extraSupported": [
-    "search",
-    "genre",
-    "skip"
-  ]
+  "extraSupported": ["search", "genre", "skip"]
 }

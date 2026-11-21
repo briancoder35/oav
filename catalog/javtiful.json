@@ -1,0 +1,27 @@
+{
+  "type": "movie",
+  "name": "OAV: JAVtiful",
+  "id": "javtiful",
+  "posterShape": "landscape",
+  "extra": [
+    {
+      "name": "search"
+    },
+    {
+      "name": "genre",
+      "options": [
+        "New release",
+        "Censored",
+        "Uncensored",
+        "Reducing Mosaic",
+        "Popular Today",
+        "Popular Week",
+        "Popular Month"
+      ]
+    },
+    {
+      "name": "skip"
+    }
+  ],
+  "extraSupported": ["search", "genre", "skip"]
+}

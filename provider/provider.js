@@ -1,12 +1,20 @@
 const axios = require('axios');
+const { wrapper } = require('axios-cookiejar-support');
+const { CookieJar } = require('tough-cookie');
+const jar = new CookieJar();
+const client = wrapper(axios.create({ jar }));
 const m3u8 = require('m3u8-parser');
 const logger = require('../logger');
-const { event, track } = require('../analytics');
+const process = require('node:process');
+
+const cache = new Map();
+const pending = new Map();
 
 class Provider {
   static LIMIT = 50;
   static TYPE = 'movie';
-  static TRANSPORT_URL = 'https://07b88951aaab-jaxxx-v2.baby-beamup.club/manifest.json';
+  static TRANSPORT_URL =
+    'https://7aa0680f21e4-onlyavideo.baby-beamup.club/manifest.json';
 
   constructor(baseUrl, name, limit) {
     this.baseUrl = baseUrl;
@@ -18,11 +26,46 @@ class Provider {
     return this.name;
   }
 
+  getMetaGenreLinks(catalogId, genres) {
+    const addonUrl = process.env.HOST_NAME || Provider.TRANSPORT_URL;
+    return genres
+      .filter(({ name, href }) => name && href)
+      .map(({ name, href }) => ({
+        name,
+        category: 'Genres',
+        url: `stremio:///discover/${encodeURIComponent(addonUrl)}/${Provider.TYPE}/${catalogId}?genre=${encodeURIComponent(href)}`,
+      }));
+  }
+
+  getGenreCatalogUrl(genre, pathMappings) {
+    if (typeof genre !== 'string') {
+      throw new Error(`Unsupported ${this.getName()} genre: ${genre}`);
+    }
+
+    const mappedPath = pathMappings[genre];
+    if (mappedPath) {
+      return new URL(mappedPath, this.baseUrl).toString();
+    }
+
+    let genreUrl;
+    try {
+      genreUrl = genre.startsWith('/')
+        ? new URL(genre, this.baseUrl)
+        : new URL(genre);
+    } catch {
+      throw new Error(`Unsupported ${this.getName()} genre: ${genre}`);
+    }
+    if (genreUrl.origin !== new URL(this.baseUrl).origin) {
+      throw new Error(`Unsupported ${this.getName()} genre URL: ${genre}`);
+    }
+    return genreUrl.toString();
+  }
+
   activate(catalogId) {
     return catalogId.indexOf(this.getName()) !== -1;
   }
 
-  getInitialUrl(catalogId) {
+  getInitialUrl() {
     return this.baseUrl;
   }
 
@@ -31,14 +74,76 @@ class Provider {
   }
 
   async fetchHtml(url) {
-    console.info('fetching url', url);
-    try {
-      const response = await fetch(url);
-      return response.text();
-    } catch (error) {
-      console.error(error);
-      return '';
+    logger.info('fetching url', url);
+
+    const cached = cache.get(url);
+    if (cached && Date.now() - cached.time < 5000) {
+      return cached.data;
     }
+
+    if (pending.has(url)) {
+      return pending.get(url);
+    }
+
+    const request = client
+      .get(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: this.baseUrl,
+          Origin: this.baseUrl,
+          Connection: 'keep-alive',
+        },
+        timeout: 15000,
+      })
+      .then((response) => {
+        cache.set(url, {
+          data: response.data,
+          time: Date.now(),
+        });
+        pending.delete(url);
+        return response.data;
+      })
+      .catch((error) => {
+        pending.delete(url);
+        logger.error(error);
+        return '';
+      });
+
+    pending.set(url, request);
+
+    return request;
+  }
+
+  async fetchJson(url) {
+    try {
+      const response = await client.get(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
+          Accept: 'application/json, text/plain, */*',
+          Referer: this.baseUrl,
+        },
+        timeout: 15000,
+      });
+
+      return response.data;
+    } catch (error) {
+      logger.error('fetchJson error', error);
+      return null;
+    }
+  }
+
+  cleanUrl(url) {
+    if (!url) return url;
+
+    return url
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/g, '&')
+      .replace(/&amp;/g, '&');
   }
 
   page(skip) {
@@ -64,7 +169,7 @@ class Provider {
     return `?skip=${skip}`;
   }
 
-  getCatalogMetas(html) {
+  getCatalogMetas() {
     return [];
   }
 
@@ -77,7 +182,6 @@ class Provider {
 
   async handleCatalog(args) {
     if (args.type === Provider.TYPE && this.activate(args.id)) {
-      this.track(this.getAnalyticEvent(event.CATALOG, args.id), args);
       logger.info({ args }, 'handleCatalog');
       let url = this.getInitialUrl(args.id);
       if (args.extra) {
@@ -90,64 +194,175 @@ class Provider {
       }
 
       if (args.extra.skip) {
-        url += this.handlePagination(url, args);
+        const paginated = this.handlePagination(url, args);
+
+        if (paginated.startsWith('http')) {
+          url = paginated;
+        } else {
+          url += paginated;
+        }
       }
 
-      const html = await this.fetchHtml(url).catch(e => '');
-      const metas = this.getCatalogMetas(html);
+      if (url.match(/https?:\/\/.*https?:\/\//)) {
+        logger.error('❌ Broken URL detected:', url);
+        return { metas: [] };
+      }
+
+      const html = await this.fetchHtml(url);
+      const metas = await this.getCatalogMetas(html);
       logger.debug({ metasSize: metas.length }, 'catalog');
-      return Promise.resolve({ metas });
-    } else {
-      return Promise.resolve({ metas: [] });
+      return { metas };
     }
+
+    return { metas: [] };
   }
 
   async handleMeta(args) {
     if (args.type === Provider.TYPE && this.activate(args.id)) {
-      this.track(this.getAnalyticEvent(event.METADATA), args);
-      return this.getMetadata(args)
-        .then(meta => {
-          return { meta };
-        });
+      return this.getMetadata(args).then((meta) => {
+        return { meta };
+      });
     }
 
-    return Promise.resolve({ meta: {} });
+    return { meta: {} };
   }
 
   async getMetadata(args) {
     logger.info({ args }, 'getMetadata');
     const { id } = args;
-    return this.fetchHtml(id)
-      .then(html => this.parseVideoPage({ id, html }));
+    const result = await this.fetchHtml(id).then((html) =>
+      this.parseVideoPage({ id, html }),
+    );
+
+    if (result && result.metaResponse) {
+      return result.metaResponse;
+    }
+
+    return result;
   }
 
   async handleStream(args) {
     const { id } = args;
     if (args.type === Provider.TYPE && this.activate(id)) {
-      this.track(this.getAnalyticEvent(event.STREAM), args);
       logger.info({ args }, 'handleStream');
       return this.processStreams(args);
     }
-    return Promise.resolve({ streams: [] });
+    return { streams: [] };
   }
 
   async processStreams({ id }) {
-    return this.fetchHtml(id)
-      .then(html => this.parseVideoPage({ id, html }))
-      .then(meta => this.getStreams(meta));
+    const html = await this.fetchHtml(id);
+    const hls = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+    if (hls) {
+      return this.getStreams({ videoPageUrl: this.cleanUrl(hls[0]) });
+    }
+
+    const dash = html.match(/https?:\/\/[^\s"'<>]+\.mpd[^\s"'<>]*/i);
+    if (dash) {
+      return {
+        streams: [
+          {
+            type: Provider.TYPE,
+            url: this.cleanUrl(dash[0]),
+            name: 'DASH',
+          },
+        ],
+      };
+    }
+
+    const meta = await this.parseVideoPage({ id, html });
+
+    if (meta.streams && meta.streams.length) {
+      return { streams: meta.streams };
+    }
+
+    if (meta.videoPageUrl && meta.videoPageUrl.includes('/embed/')) {
+      const embedHtml = await this.fetchHtml(meta.videoPageUrl);
+      const m3u8 = embedHtml.match(
+        /(?:https?:)?\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i,
+      );
+
+      if (m3u8) {
+        let url = m3u8[0];
+        if (url.startsWith('//')) {
+          url = 'https:' + url;
+        }
+
+        meta.videoPageUrl = this.cleanUrl(url);
+      }
+    }
+
+    const result = await this.getStreams(meta);
+
+    if (result.streams && result.streams.length) {
+      return result;
+    }
+
+    const mp4 = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/i);
+    if (mp4) {
+      return {
+        streams: [
+          {
+            type: Provider.TYPE,
+            url: this.cleanUrl(mp4[0]),
+            name: 'MP4',
+            behaviorHints: {
+              notWebReady: false,
+            },
+          },
+        ],
+      };
+    }
+
+    return { streams: [] };
   }
 
   getStreams(meta) {
-    return this.fetchHtml(meta.videoPageUrl)
-      .then(content => this.parseM3u8(content))
-      .then(streams => streams.map(stream => this.transformStream(meta.videoPageUrl, stream)))
-      .then(streams => {
-        return { streams };
+    if (!meta.videoPageUrl) {
+      return { streams: [] };
+    }
+
+    if (/\.mp4(\?|$)/i.test(meta.videoPageUrl)) {
+      return Promise.resolve({
+        streams: [
+          {
+            type: Provider.TYPE,
+            url: meta.videoPageUrl,
+            name: 'MP4',
+          },
+        ],
       });
+    }
+
+    return this.fetchHtml(meta.videoPageUrl)
+      .then((content) => {
+        if (content.includes('#EXTM3U')) {
+          return this.parseM3u8(content);
+        }
+
+        return [];
+      })
+      .then((streams) =>
+        streams.map((stream) =>
+          this.transformStream(meta.videoPageUrl, stream),
+        ),
+      )
+      .then((streams) => ({ streams }));
   }
 
-  transformStream(url, stream) {
-    return stream;
+  transformStream(baseUrl, stream) {
+    if (!stream.url) return stream;
+
+    if (stream.url.startsWith('http')) {
+      return stream;
+    }
+
+    const base = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
+
+    return {
+      ...stream,
+      url: base + stream.url,
+    };
   }
 
   parseM3u8(content) {
@@ -156,34 +371,39 @@ class Provider {
     parser.push(content);
     parser.end();
     try {
-      parser.manifest.playlists.forEach(playlist => {
+      parser.manifest.playlists.forEach((playlist) => {
         streams.push({
           resolution: playlist.attributes.RESOLUTION.height + 'p',
           uri: playlist.uri,
         });
       });
-      streams.sort((a, b) => parseInt(b.resolution.split('p')[0]) - parseInt(a.resolution.split('p')[0]));
+      streams.sort(
+        (a, b) =>
+          parseInt(b.resolution.split('p')[0]) -
+          parseInt(a.resolution.split('p')[0]),
+      );
       logger.debug({ streams }, 'streams', streams.length);
       return streams.map((stream) => {
         return {
-          type: 'movie',
+          type: Provider.TYPE,
           url: stream.uri,
           name: stream.resolution,
+          behaviorHints: {
+            notWebReady: true,
+          },
         };
       });
     } catch (e) {
-      console.error('parseM3u8 error', e);
+      logger.error('parseM3u8 error', e);
       return streams;
     }
   }
 
-  parseVideoPage(args) {
+  parseVideoPage() {
     return {};
   }
 
-  track(a1, a2) {
-    // track(a1, a2)
-  }
+  track() {}
 }
 
 module.exports = Provider;

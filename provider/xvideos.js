@@ -1,10 +1,37 @@
 const { load } = require('cheerio');
-const logger = require('../logger');
 const { meta } = require('../model');
 const Provider = require('./provider');
 
-class XvideosProvider extends Provider {
+const DEFAULT_POSTER = 'https://thumb-cdn77.xvideos-cdn.com/default.jpg';
 
+const cleanTitle = (title = '') =>
+  title
+    .replace(/^xvideos\s*video\s*/i, '')
+    .replace(/^xvideos\s*/i, '')
+    .trim();
+
+const normalizeUrl = (url) => {
+  if (!url || typeof url !== 'string') return undefined;
+
+  if (!url.includes('xvideos-cdn.com')) return url;
+
+  if (url.includes('thumb-cdn77')) return url;
+
+  return url
+    .replace(/^\/\//, 'https://')
+    .replace(/thumbs?-cdn\d+\.xvideos-cdn\.com/, 'thumb-cdn77.xvideos-cdn.com')
+    .replace(/thumbs\d*\.xvideos-cdn\.com/, 'thumb-cdn77.xvideos-cdn.com');
+};
+
+const htmlCache = new Map();
+
+const inFlight = new Map();
+const HTML_TTL = 1000 * 60 * 5;
+
+const metaCache = new Map();
+const META_TTL = 1000 * 60 * 5;
+
+class XvideosProvider extends Provider {
   constructor() {
     super('https://www.xvideos.com', 'xvideos', 50);
   }
@@ -14,27 +41,51 @@ class XvideosProvider extends Provider {
   }
 
   async fetchHtml(url) {
-    console.info('fetching url', url);
-    try {
-      const response = await fetch(url, {
-        "credentials": "include"
-      });
-      return response.text();
-    } catch (error) {
-      console.error(error);
-      return '';
+    const cached = htmlCache.get(url);
+
+    if (cached && Date.now() - cached.time < HTML_TTL) {
+      return cached.data;
     }
+
+    if (inFlight.has(url)) {
+      return inFlight.get(url);
+    }
+
+    const promise = (async () => {
+      try {
+        const html = await super.fetchHtml(url);
+
+        htmlCache.set(url, { data: html, time: Date.now() });
+        if (htmlCache.size > 300) {
+          htmlCache.delete(htmlCache.keys().next().value);
+        }
+
+        return html;
+      } finally {
+        inFlight.delete(url);
+      }
+    })();
+    inFlight.set(url, promise);
+
+    return promise;
   }
 
-  getInitialUrl(catalogId) {
+  getInitialUrl() {
     return this.baseUrl;
   }
 
   handleSearch({ extra: { search: keyword } }) {
-    return `${this.baseUrl}/?k=${keyword}`;
+    return `${this.baseUrl}/?k=${encodeURIComponent(keyword)}`;
   }
 
   handleGenre(args) {
+    const genre = args.extra.genre;
+    if (
+      typeof genre === 'string' &&
+      (genre.startsWith('/') || /^https?:\/\//i.test(genre))
+    ) {
+      return this.getGenreCatalogUrl(genre, {});
+    }
     return this.handleSearch({ ...args, extra: { search: args.extra.genre } });
   }
 
@@ -49,58 +100,130 @@ class XvideosProvider extends Provider {
   getCatalogMetas(html) {
     const metadatas = [];
     const $ = load(html);
+    const seen = new Set();
 
-    $('div.thumb-block').each((index, element) => {
+    $('div.frame-block.thumb-block').each((_, element) => {
       const $div = $(element);
-      const $children = $div.children('div');
-      let parsedMeta = {};
-      // Check if the div has class "thumb-inside"
-      if ($children.hasClass('thumb-inside')) {
-        // Extract all attributes from tags inside the div with class "thumb-inside"
-        const attributes = {};
-        $children.first().find('*').each((i, el) => {
-          const attrs = el.attribs;
-          for (const attr in attrs) {
-            attributes[attr] = attrs[attr];
+      const $thumbInside = $div.children('.thumb-inside').first();
+      const $thumbUnder = $div.children('.thumb-under').first();
+      if (!$thumbInside.length || !$thumbUnder.length) {
+        return;
+      }
+
+      const $videoLink = $thumbInside
+        .find('a[href]')
+        //.filter((_, anchor) => !/THUMBNUM/i.test($(anchor).attr('href')))
+        .first();
+      const href = $videoLink
+        .attr('href')
+        .split('?')[0]
+        .replace(/\/THUMBNUM.*/, '')
+        .replace(/\/$/, '');
+
+      if (seen.has(href)) return;
+
+      seen.add(href);
+      const videoPageUrl = new URL(href, this.baseUrl).toString();
+      const title = $thumbUnder.find('p > a[title]').first().attr('title');
+      const img = $div.find('img').first();
+      let thumb =
+        img.attr('data-thumb_url169') ||
+        img.attr('data-thumb_url') ||
+        img.attr('data-thumb') ||
+        img.attr('data-src') ||
+        img.attr('src');
+      thumb = normalizeUrl(thumb);
+
+      if (!thumb) {
+        thumb = DEFAULT_POSTER;
+      } else if (thumb.includes('THUMBNUM')) {
+        const candidates = [
+          img.attr('data-thumb'),
+          img.attr('data-src'),
+          img.attr('src'),
+        ].filter(Boolean);
+        let resolved = null;
+
+        for (const c of candidates) {
+          const match = c.match(/xv_(\d+)_t\.jpg/);
+          if (match) {
+            resolved = thumb.replace('THUMBNUM', match[1]);
+            break;
           }
-        });
-        parsedMeta = { ...attributes };
-      }
+        }
+        if (!resolved) {
+          resolved = thumb.replace('THUMBNUM', '15');
+        }
 
-      if ($children.hasClass('thumb-under')) {
-        const title = $children.last().find('p > a').attr('title');
-        parsedMeta = { ...parsedMeta, title };
-      }
+        thumb = normalizeUrl(resolved);
 
-      const id = this.baseUrl + parsedMeta['href'];
-      if (parsedMeta['href']) {
-        metadatas.push(new meta.MetaPreview(
-          id.replace('/THUMBNUM', ''),
-          Provider.TYPE,
-          parsedMeta['title'],
-          parsedMeta['data-src']));
+        if (!thumb) {
+          thumb = DEFAULT_POSTER;
+        }
+      }
+      //const poster = new URL(posterUrl, this.baseUrl).toString();
+
+      if (videoPageUrl) {
+        metadatas.push(
+          new meta.MetaPreview(
+            videoPageUrl,
+            Provider.TYPE,
+            cleanTitle(title),
+            thumb,
+            { posterShape: 'landscape' },
+          ),
+        );
       }
     });
     return metadatas;
   }
 
   async getMetadata(args) {
-    return super.getMetadata(args)
-      .then(meta => meta.metaResponse);
+    const cached = metaCache.get(args.id);
+    if (cached && Date.now() - cached.time < META_TTL) {
+      return cached.data.metaResponse;
+    }
+
+    const html = await this.fetchHtml(args.id);
+    const parsed = this.parseVideoPage({ id: args.id, html });
+
+    metaCache.set(args.id, {
+      data: parsed,
+      time: Date.now(),
+    });
+
+    if (metaCache.size > 300) {
+      const firstKey = metaCache.keys().next().value;
+      metaCache.delete(firstKey);
+    }
+
+    return parsed.metaResponse;
   }
 
   parseVideoPage({ id, html }) {
     const $ = load(html);
-    const links = [];
-    $('div.video-tags > a').each((i, e) => {
-      const $tag = $(e);
-      links.push(new meta.MetaLink($tag.text(), 'Genre', this.baseUrl + $tag.attr('href')));
-    });
+    const tagElements = $(
+      '.video-metadata.video-tags-list.ordered-label-list.cropped a.is-keyword.btn.btn-default',
+    )
+      .map((_, element) => ({
+        name: $(element).text().trim(),
+        href: $(element).attr('href'),
+      }))
+      .get()
+      .filter(({ name, href }) => name && href);
+    const genres = tagElements.map(({ name }) => name);
+    const links = this.getMetaGenreLinks(
+      'xvideos',
+      tagElements.map(({ name, href }) => ({
+        name,
+        href: new URL(href, this.baseUrl).toString(),
+      })),
+    );
 
     $('script').each((i, e) => {
       const $script = $(e);
       if ($script.text().includes('html5player')) {
-        console.log("html5player", JSON.stringify($script.text()));
+        // console.log("html5player", JSON.stringify($script.text()));
       }
     });
 
@@ -125,7 +248,6 @@ class XvideosProvider extends Provider {
       const attribs = e.attribs;
       metaMap[attribs.name || attribs.property] = attribs.content;
     });
-
     const metaResponse = new meta.MetaResponse(
       id,
       Provider.TYPE,
@@ -133,8 +255,11 @@ class XvideosProvider extends Provider {
       {
         links,
         description: metaMap['description'],
-        background,
-        genres: metaMap['keywords'].split(','),
+        background: background,
+        poster: background,
+        posterShape: 'landscape',
+        genres: genres,
+        genre: genres,
       },
     );
     return {
@@ -144,71 +269,84 @@ class XvideosProvider extends Provider {
   }
 
   async processStreams({ id }) {
-    return this.fetchHtml(this.baseUrl)
-      .then(_ => this.fetchHtml(id))
-      .then(async html => {
-        const meta = this.parseVideoPage({ id, html })
-        let streamsResponse = await super.getStreams(meta);
-        if (streamsResponse && streamsResponse.streams.length > 0) {
-          return streamsResponse;
+    let cached = metaCache.get(id);
+    let metaData;
+
+    if (cached && Date.now() - cached.time < META_TTL) {
+      metaData = cached.data;
+    } else {
+      const html = await this.fetchHtml(id);
+      metaData = this.parseVideoPage({ id, html });
+
+      metaCache.set(id, {
+        data: metaData,
+        time: Date.now(),
+      });
+    }
+
+    let streamsResponse = await super.getStreams(metaData);
+
+    if (streamsResponse?.streams?.length) {
+      streamsResponse.streams = streamsResponse.streams.map((s) => {
+        const match = s.url?.match(/(\d{3,4})p/);
+        const resolution =
+          s.resolution || (match ? match[1] + 'p' : null) || 'unknown';
+        let finalUrl = s.url;
+
+        if (!s.url.startsWith('http') && metaData.videoPageUrl) {
+          const base = metaData.videoPageUrl.substring(
+            0,
+            metaData.videoPageUrl.lastIndexOf('/') + 1,
+          );
+          finalUrl = base + s.url;
         }
 
-        // alternative stream
-        const $ = load(html);
-        const $json = JSON.parse($('script[type="application/ld+json"]').text());
-        const streams = [
-          {
-            type: 'movie',
-            url: $json["contentUrl"],
-            name: 'Onlyporn',
-          }
-        ];
-        return { streams };
+        return {
+          ...s,
+          url: finalUrl,
+          name: `XVideos ${resolution}`,
+          quality: resolution,
+        };
       });
+
+      streamsResponse.streams.sort((a, b) => {
+        const getNum = (r) => parseInt(r) || 0;
+        return getNum(b.quality) - getNum(a.quality);
+      });
+
+      return streamsResponse;
+    }
+
+    const $ = load(await this.fetchHtml(id));
+    let contentUrl;
+    try {
+      contentUrl = JSON.parse(
+        $('script[type="application/ld+json"]').first().text(),
+      )?.contentUrl;
+    } catch {
+      return { streams: [] };
+    }
+    if (typeof contentUrl !== 'string' || !contentUrl) {
+      return { streams: [] };
+    }
+    const streams = [
+      {
+        type: Provider.TYPE,
+        url: contentUrl,
+        name: 'OnlyAVideo',
+      },
+    ];
+    return { streams };
   }
 
   transformStream(url, stream) {
-    return { ...stream, url: url.replace('hls.m3u8', '') + stream.url };
+    return {
+      ...stream,
+      url: url.includes('hls.m3u8')
+        ? url.replace('hls.m3u8', '') + stream.url
+        : url + stream.url,
+    };
   }
 }
-
-const provider = XvideosProvider.create();
-// const metas = provider.parseVideoPage({
-//   id: 'https://www.xvideos.com/THUMBNUM', html: `
-// <script>
-// 	logged_user = false;
-// 	var static_id_cdn = 10;
-// 	var html5player = new HTML5Player('html5video', '54638695');
-// 	if (html5player) {
-// 	    html5player.setVideoTitle('TOMB RIDER XXX part. #01 - The Parody - (Full HD - Refurbished Version)');
-// 	    html5player.setEncodedIdVideo('kuhblpm2c69');
-// 	    html5player.setSponsors(false);
-// 	    html5player.setVideoUrlLow('https://cdn77-vid-mp4.xvideos-cdn.com/Q5D4bOupANGTJjmiyiyEgg==,1715669269/videos/3gp/6/4/3/xvideos.com_6437c7f90ba29a1e02ade30236f76f63.mp4?ui=MTk4LjI3LjE3NC4yMTUtL3ZpZGVvLmt1aGJscG0yYzY5L3RvbWJfcmlkZXJf');
-// 	    html5player.setVideoUrlHigh('https://cdn77-vid-mp4.xvideos-cdn.com/dnPcw59AsjQ-YGuP1jW3HQ==,1715669269/videos/mp4/6/4/3/xvideos.com_6437c7f90ba29a1e02ade30236f76f63.mp4?ui=MTk4LjI3LjE3NC4yMTUtL3ZpZGVvLmt1aGJscG0yYzY5L3RvbWJfcmlkZXJf');
-// 	    html5player.setVideoHLS('https://cdn77-vid.xvideos-cdn.com/iq9EzdJeOvKR0-6HZInR9g==,1715669269/videos/hls/64/37/c7/6437c7f90ba29a1e02ade30236f76f63/hls.m3u8');
-// 	    html5player.setThumbUrl('https://cdn77-pic.xvideos-cdn.com/videos/thumbslll/64/37/c7/6437c7f90ba29a1e02ade30236f76f63/6437c7f90ba29a1e02ade30236f76f63.9.jpg');
-// 	    html5player.setThumbUrl169('https://cdn77-pic.xvideos-cdn.com/videos/thumbs169poster/64/37/c7/6437c7f90ba29a1e02ade30236f76f63/6437c7f90ba29a1e02ade30236f76f63.17.jpg');
-// 	    html5player.setRelated(video_related);
-// 	    html5player.setThumbSlide('https://cdn77-pic.xvideos-cdn.com/videos/thumbs169/64/37/c7/6437c7f90ba29a1e02ade30236f76f63/mozaique.jpg');
-// 	    html5player.setThumbSlideBig('https://cdn77-pic.xvideos-cdn.com/videos/thumbnails/10/08/2a/54638695/mozaique_full.jpg');
-// 	    html5player.setThumbSlideMinute('https://cdn77-pic.xvideos-cdn.com/videos/thumbnails/10/08/2a/54638695/mozaiquemin_');
-// 	    html5player.setIdCDN('10');
-// 	    html5player.setIdCdnHLS('10');
-// 	    html5player.setFakePlayer(false);
-// 	    html5player.setDesktopiew(true);
-//       html5player.setSeekBarColor('#de2600');
-// 	    html5player.setUploaderName('xtime-vod');
-// 	    html5player.setVideoURL('/video.kuhblpm2c69/tomb_rider_xxx_part._01_-_the_parody_-_full_hd_-_refurbished_version_');
-// 	    html5player.setStaticPath('https://static-cdn77.xvideos-cdn.com/v-f423c573279/v3/');
-// 	    html5player.setHttps();
-// 	    html5player.setCanUseHttps();
-// 	    document.getElementById('html5video').style.minHeight = '';
-// 	    html5player.initPlayer();
-//    }
-
-// </script>
-// ` });
-
-// console.log('meta', metas);
 
 module.exports = XvideosProvider.create;

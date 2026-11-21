@@ -1,36 +1,34 @@
-const shuffle = require('fisher-yates');
-const porntrexCatalogs = require('./porntrex');
-const missavCatalog = require('./missav.json');
-const { spankbangCatalogs } = require('./spankbang');
-const xhamsterCatalogs = require('./xhamster');
 const { catalogs: epornerCatalogs } = require('./eporner');
+const xhamsterCatalogs = require('./xhamster');
+const porntrexCatalogs = require('./porntrex');
 const xvideosCatalog = require('./xvideos.json');
-const { catalogs: sxyprnCatalogs } = require('./sxyprn');
-
-function randomize(catalogs) {
-  const arr = catalogs.map((_e, i) => i);
-  return shuffle(arr).map(i => catalogs[i]);
-}
+const xnxxCatalog = require('./xnxx.json');
+const javtifulCatalog = require('./javtiful.json');
+const javguruCatalog = require('./javguru.json');
 
 const catalogNames = [
-  'spankbang',
-  'xhamster',
   'eporner',
+  'xhamster',
   'porntrex',
-  'missav'
+  'xvideos',
+  'xnxx',
+  'javtiful',
+  'javguru',
 ];
 
 const catalogs = [
   ...epornerCatalogs,
   ...xhamsterCatalogs,
-  ...porntrexCatalogs,
-  ...spankbangCatalogs,
-  missavCatalog
+  porntrexCatalogs,
+  xvideosCatalog,
+  xnxxCatalog,
+  javtifulCatalog,
+  javguruCatalog,
 ];
 
 const addonEnabled = (id) => {
   return getActiveProvider(id) !== null;
-}
+};
 
 const getActiveProvider = (id) => {
   for (const name of catalogNames) {
@@ -39,11 +37,11 @@ const getActiveProvider = (id) => {
     }
   }
   return null;
-}
+};
 
 module.exports = {
   catalogs,
   catalogNames,
   addonEnabled,
-  getActiveProvider
+  getActiveProvider,
 };

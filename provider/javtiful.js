@@ -5,8 +5,8 @@ const { getProxiedUrl } = require('./hls-proxy');
 
 const pathMappings = {
   'New release': '/videos',
-  'Censored': '/censored',
-  'Uncensored': '/uncensored',
+  Censored: '/censored',
+  Uncensored: '/uncensored',
   'Reducing Mosaic': '/reducing-mosaic',
   'Popular Today': '/videos?sort=popular_today',
   'Popular Week': '/videos?sort=popular_week',

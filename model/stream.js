@@ -1,6 +1,5 @@
 class Stream {
   constructor(options = {}) {
-    // Initialize with default values or provided options
     this.url = options.url || '';
     this.ytId = options.ytId || '';
     this.infoHash = options.infoHash || '';

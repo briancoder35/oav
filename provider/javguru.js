@@ -1,21 +1,24 @@
+const { Buffer } = require('node:buffer');
 const { load } = require('cheerio');
 const { meta } = require('../model');
-const Provider = require('./provider');
-const { Buffer } = require('node:buffer');
 const { getProxiedUrl } = require('./hls-proxy');
+const Provider = require('./provider');
+
+const pathMappings = {
+  'New release': '/category/jav/?orderby=date&order=DESC',
+  'Popular Month': '/category/jav/?orderby=views-monthly&order=DESC',
+};
 
 function getJsString(source, key) {
   const match = source.match(new RegExp(`\\b${key}\\s*:\\s*(['"])(.*?)\\1`));
-  return match ? match[2] : undefined;
+  return match?.[2];
 }
 
 function parseWindowConfig(html) {
-  const configMatch = html.match(/\bwindow\.cfg\s*=\s*\{([\s\S]*?)\}\s*;/);
-  if (!configMatch) {
+  const source = html.match(/\bwindow\.cfg\s*=\s*\{([\s\S]*?)\}\s*;/)?.[1];
+  if (!source) {
     return undefined;
   }
-
-  const source = configMatch[1];
   const keysMatch = source.match(/\bkeys\s*:\s*\[([\s\S]*?)\]/);
   const config = {
     cid: getJsString(source, 'cid'),
@@ -26,81 +29,114 @@ function parseWindowConfig(html) {
       ? [...keysMatch[1].matchAll(/(['"])(.*?)\1/g)].map((match) => match[2])
       : undefined,
   };
-
-  if (
-    Object.values(config).some((value) => value === undefined) ||
-    !config.keys.length
-  ) {
-    return undefined;
-  }
-
-  return config;
+  return Object.values(config).some((value) => value === undefined) ||
+    !config.keys?.length
+    ? undefined
+    : config;
 }
 
-function parsePackedPlayerFileUrl(html) {
-  const packedMatch = html.match(
+function unpackPlayer(html) {
+  const match = html.match(
     /\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([^']*)'\.split\('\|'\)\)\)/,
   );
-  if (!packedMatch) {
+  if (!match) {
     return undefined;
   }
-
-  const [, packedCode, radixValue, wordCountValue, dictionary] = packedMatch;
+  const [, packedCode, radixValue, wordCountValue, dictionary] = match;
   const radix = Number(radixValue);
   const wordCount = Number(wordCountValue);
   const words = dictionary.split('|');
-  if (
-    !Number.isInteger(radix) ||
-    radix < 2 ||
-    radix > 36 ||
-    !Number.isInteger(wordCount)
-  ) {
+  if (!Number.isInteger(radix) || radix < 2 || radix > 36) {
     return undefined;
   }
-
   let unpackedCode = packedCode;
-  for (let index = Math.min(wordCount, words.length) - 1; index >= 0; index--) {
+  for (
+    let index = Math.min(wordCount, words.length) - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const token = index.toString(radix);
     if (words[index]) {
-      const token = index.toString(radix);
       unpackedCode = unpackedCode.replace(
-        new RegExp(`\\b${token}\\b`, 'g'),
-        () => words[index],
+        new RegExp(`(^|[^A-Za-z0-9_$])${token}([^A-Za-z0-9_$]|$)`, 'gi'),
+        (_match, leading, trailing) => `${leading}${words[index]}${trailing}`,
       );
     }
   }
-
-  const fileMatch = unpackedCode.match(/\bfile\s*:\s*("(?:\\.|[^"\\])*")/);
-  return fileMatch ? JSON.parse(fileMatch[1]) : undefined;
+  return unpackedCode;
 }
 
-function normalizeM3u8Url(url) {
-  return url.replace(/^ttps:\/\//i, 'https://');
+function parsePackedPlayerFileUrl(html) {
+  const unpackedCode = unpackPlayer(html);
+  if (!unpackedCode) {
+    return undefined;
+  }
+  const linksMatch = unpackedCode.match(
+    /\b(?:var\s+)?links\s*=\s*\{([\s\S]*?)\}\s*;/,
+  );
+  if (linksMatch) {
+    const hls2Match = linksMatch[1].match(
+      /["']hls2["']\s*:\s*("(?:\\.|[^"\\])*")/i,
+    );
+    if (hls2Match) {
+      try {
+        const hls2Url = JSON.parse(hls2Match[1]);
+        if (/\.m3u8(?:$|[?#])/i.test(hls2Url)) {
+          return hls2Url;
+        }
+      } catch {
+        // Try other URL patterns below.
+      }
+    }
+  }
+  const hls2Match = unpackedCode.match(
+    /["']hls2["']\s*:\s*("(?:\\.|[^"\\])*"|\/[^"'<>\\s]+)/i,
+  );
+  if (hls2Match) {
+    const hls2Url = hls2Match[1].replace(/^["']|["']$/g, '');
+    if (hls2Url.startsWith('/')) {
+      return `https://javclan.com${hls2Url}`;
+    }
+    if (/\.m3u8(?:$|[?#])/i.test(hls2Url)) {
+      return hls2Url;
+    }
+  }
+  const javclanMatch = unpackedCode.match(
+    /(https?:\/\/javclan\.com\/[^\s"'<>]+\.m3u8[^\s"'<>]*|\/stream\/[^\s"'<>]+\/master\.m3u8)/i,
+  );
+  if (javclanMatch) {
+    return javclanMatch[1].startsWith('/')
+      ? `https://javclan.com${javclanMatch[1]}`
+      : javclanMatch[1];
+  }
+  const fileMatch = unpackedCode.match(
+    /\b(?:file|url)\s*[:=]\s*("(?:\\.|[^"\\])*"|`[^`]*`)/,
+  );
+  if (fileMatch) {
+    const rawUrl = fileMatch[1].replace(/^["'`]|["'`]$/g, '');
+    if (/\.m3u8(?:$|[?#])/i.test(rawUrl)) {
+      return rawUrl;
+    }
+  }
+  return undefined;
 }
-
-const pathMappings = {
-  'New release': '/category/jav/?orderby=date&order=DESC',
-  Decensored: '/category/decensored/',
-  Amateur: '/category/amateur/',
-  Idol: '/category/idol/',
-  FC2: '/category/fc2/',
-  '4K': '/category/4k/',
-  'Popular Month': '/category/jav/?orderby=views-monthly&order=DESC',
-};
 
 class JavguruProvider extends Provider {
   constructor() {
-    super('https://jav.guru', 'jav', 24);
+    super('https://jav.guru', 'javguru', 24);
+  }
+
+  static create() {
+    return new JavguruProvider();
   }
 
   activate(id) {
     if (typeof id !== 'string') {
       return false;
     }
-
     if (super.activate(id)) {
       return true;
     }
-
     try {
       return new URL(id).hostname === new URL(this.baseUrl).hostname;
     } catch {
@@ -108,20 +144,25 @@ class JavguruProvider extends Provider {
     }
   }
 
-  static create() {
-    return new JavguruProvider();
-  }
-
   getInitialUrl() {
-    return `${this.baseUrl}/category/jav/`;
+    return this.baseUrl;
   }
 
-  handleSearch({ extra: { search: keyword } }) {
-    return `${this.baseUrl}/?s=${keyword}/`;
+  handleSearch({ extra: { search } }) {
+    const searchUrl = new URL('/', this.baseUrl);
+    searchUrl.searchParams.set('s', String(search).trim());
+    return searchUrl.toString();
   }
 
   handleGenre({ extra: { genre } }) {
-    return this.getGenreCatalogUrl(genre, pathMappings);
+    if (
+      typeof genre === 'string' &&
+      (genre.startsWith('/') || /^[a-z][a-z\d+.-]*:\/\//i.test(genre))
+    ) {
+      return this.getGenreCatalogUrl(genre, pathMappings);
+    }
+    const path = pathMappings[genre] || `/category/${this.toSlug(genre)}/`;
+    return new URL(path, this.baseUrl).toString();
   }
 
   handlePagination(url, { extra: { skip } }) {
@@ -129,102 +170,53 @@ class JavguruProvider extends Provider {
     if (!Number.isFinite(skipOffset) || skipOffset <= 0) {
       return '';
     }
-
     const pageNumber = Math.floor(skipOffset / this.limit) + 1;
-    if (url.includes('?')) {
-      return `&paged=${pageNumber}`;
+    const pageUrl = new URL(url);
+    if (pageUrl.searchParams.has('s')) {
+      pageUrl.pathname = `/page/${pageNumber}/`;
+      return pageUrl.toString();
     }
-    return `${url.endsWith('/') ? '' : '/'}page/${pageNumber}/`;
+    const cleanPath = pageUrl.pathname
+      .replace(/\/(?:page\/\d+)\/?$/, '')
+      .replace(/\/+$/, '');
+    pageUrl.pathname = `${cleanPath}/page/${pageNumber}/`;
+    if (!pageUrl.searchParams.has('orderby')) {
+      pageUrl.search = '';
+    }
+    return pageUrl.toString();
   }
 
   async getCatalogMetas(html) {
-    const metadatas = [];
     const $ = load(html);
-
-    $('.inside-article').each((_, element) => {
+    const metadatas = [];
+    for (const element of $('.inside-article').toArray()) {
       const $article = $(element);
-      const $imageContainer = $article.find('.imgg').first();
-      const $link = $imageContainer.find('a[href]').first();
-      const $image = $imageContainer.find('img').first();
-
-      if (!$link.length) {
-        return;
+      const $link = $article.find('.imgg a[href]').first();
+      const $image = $link.find('img[src]').first();
+      if (!$link.length || !$image.length) {
+        continue;
       }
-
       const videoPageUrl = new URL($link.attr('href'), this.baseUrl).toString();
-
-      const imageUrl = [
-        'data-front-lazy-src',
-        'data-src',
-        'data-lazy-src',
-        'data-original',
-        'src',
-      ]
-        .map((attribute) => $image.attr(attribute)?.trim())
-        .find(
-          (value) =>
-            value &&
-            !value.startsWith('data:image/') &&
-            !/placeholder/i.test(value),
-        );
-      const poster = imageUrl
-        ? new URL(imageUrl, `${this.baseUrl}/`).toString()
+      let poster = $image.attr('src')
+        ? new URL($image.attr('src'), this.baseUrl).toString()
         : undefined;
-      const title =
-        $image.attr('alt')?.trim() ||
-        $link.attr('title')?.trim() ||
-        $link.text().trim();
-
-      if (videoPageUrl) {
-        metadatas.push(
-          new meta.MetaPreview(videoPageUrl, Provider.TYPE, title, poster, {
-            videoPageUrl,
-          }),
-        );
+      if (poster) {
+        poster = await getProxiedUrl(poster, {
+          Origin: this.baseUrl,
+          Referer: `${this.baseUrl}/`,
+        });
       }
-    });
-
-    await Promise.all(
-      metadatas.map(async (metadata) => {
-        if (metadata.poster) {
-          metadata.poster = await getProxiedUrl(metadata.poster, {
-            Origin: new URL(this.baseUrl).origin,
-            Referer: `${this.baseUrl}/`,
-          });
-        }
-      }),
-    );
-    return metadatas;
-  }
-
-  async getMetadata({ id }) {
-    const html = await this.fetchHtml(id);
-    const videoPage = await this.parseVideoPage({ id, html });
-    return videoPage.metaResponse;
-  }
-
-  async fetchHtml(url, options = {}) {
-    const parsedUrl = new URL(url);
-    const urlLabel = `${parsedUrl.origin}${parsedUrl.pathname}`;
-    const response = await fetch(url, {
-      credentials: 'include',
-      ...options,
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Javguru request failed with status ${response.status} for ${urlLabel}`,
+      metadatas.push(
+        new meta.MetaPreview(
+          videoPageUrl,
+          Provider.TYPE,
+          $image.attr('alt')?.trim(),
+          poster,
+          { posterShape: 'landscape' },
+        ),
       );
     }
-    return await response.text();
-  }
-
-  async processStreams({ id }) {
-    return this.fetchHtml(this.baseUrl)
-      .then(() => this.fetchHtml(id))
-      .then(async (html) => {
-        const videoPage = await this.parseVideoPage({ id, html });
-        return this.getStreams(videoPage);
-      });
+    return metadatas;
   }
 
   async parseVideoPage({ id, html }) {
@@ -232,29 +224,22 @@ class JavguruProvider extends Provider {
     const metaMap = {};
     $('meta').each((_, element) => {
       const { name, property, content } = element.attribs;
-      const key = name || property;
-      if (key) {
-        metaMap[key] = content;
-      }
+      metaMap[name || property] = content;
     });
-    const $posterImage = $('.large-screenimg img[src]').first();
-    const title =
-      $('h1.titl').first().text().trim() || $('title').first().text().trim();
-    const posterUrl = $posterImage.attr('src')?.trim() || metaMap['og:image'];
-    let poster = posterUrl ? new URL(posterUrl, id).toString() : undefined;
 
+    const title =
+      $('h1.titl').first().text().trim() ||
+      metaMap['og:title'] ||
+      $('title').first().text().trim();
+    const posterElement = $('.large-screenimg img[src]').first();
+    const posterUrl = posterElement.attr('src')?.trim() || metaMap['og:image'];
+    let poster = posterUrl ? new URL(posterUrl, id).toString() : undefined;
     if (poster) {
       poster = await getProxiedUrl(poster, {
-        Origin: new URL(this.baseUrl).origin,
-        Referer: `${this.baseUrl}/`,
+        Origin: this.baseUrl,
+        Referer: id,
       });
     }
-
-    const description =
-      $posterImage.attr('alt')?.trim() ||
-      metaMap['og:description'] ||
-      title ||
-      metaMap.description;
     const tagElements = $('li.w1')
       .filter(
         (_, element) =>
@@ -272,160 +257,100 @@ class JavguruProvider extends Provider {
         href: $(element).attr('href'),
       }))
       .get()
-      .filter(({ name }) => name);
-    const genres = tagElements.map(({ name }) => name);
-    const links = this.getMetaGenreLinks('javguru', tagElements);
-
-    const iframeLocalize = $('#wp-btn-iframe')
-      .filter((_, element) => $(element).text().trim() === 'STREAM JK')
-      .first()
-      .attr('data-localize');
-
-    if (!iframeLocalize || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(iframeLocalize)) {
-      throw new Error('Javguru STREAM JK data-localize was not found');
+      .filter(({ name, href }) => name && href);
+    const iframeElement = $('#wp-btn-iframe')
+      .filter((_, element) => $(element).text().trim() === 'STREAM SB')
+      .first();
+    const localize = iframeElement.attr('data-localize');
+    if (!localize) {
+      throw new Error('Javguru STREAM SB data-localize was not found');
     }
-
-    const localizedConfigMatch = $('#wp-btn-iframe-js-extra')
-      .text()
-      .match(
-        new RegExp(
-          `\\bvar\\s+${iframeLocalize}\\s*=\\s*(\\{[\\s\\S]*?\\})\\s*;`,
-        ),
-      );
-    const localizedConfig = localizedConfigMatch
-      ? JSON.parse(localizedConfigMatch[1])
+    const scriptText = $('#wp-btn-iframe-js-extra').text();
+    const configMatch = scriptText.match(
+      new RegExp(`\\bvar\\s+${localize}\\s*=\\s*(\\{[\\s\\S]*?\\})\\s*;`),
+    );
+    const localizedConfig = configMatch
+      ? JSON.parse(configMatch[1])
       : undefined;
-    const iframeUrlBase64 = localizedConfig && localizedConfig.iframe_url;
-    const decodedIframeUrl =
-      typeof iframeUrlBase64 === 'string'
-        ? Buffer.from(iframeUrlBase64, 'base64').toString('utf8').trim()
-        : '';
-    const iframeUrl = decodedIframeUrl
-      ? new URL(decodedIframeUrl, id).toString()
+    const iframeUrl = localizedConfig?.iframe_url
+      ? new URL(
+          Buffer.from(localizedConfig.iframe_url, 'base64').toString('utf8'),
+          id,
+        ).toString()
       : undefined;
-
     if (!iframeUrl) {
-      throw new Error('Javguru STREAM JK iframeUrl was not found');
+      throw new Error('Javguru STREAM SB iframeUrl was not found');
     }
-
-    const iframeHtml = await this.fetchHtml(iframeUrl);
-    const iframePageConfig = parseWindowConfig(iframeHtml);
-
-    if (!iframePageConfig) {
+    const iframeHtml = await this.fetchHtml(iframeUrl, {
+      referer: id,
+      redirectReferer: `${this.baseUrl}/`,
+    });
+    const iframeConfig = parseWindowConfig(iframeHtml);
+    if (!iframeConfig) {
       throw new Error('Javguru iframePageConfig was not found');
     }
-
     const $iframePage = load(iframeHtml);
-    const $container = $iframePage('[id]')
-      .filter((_, element) => element.attribs.id === iframePageConfig.cid)
-      .first();
-    const tokenParts = iframePageConfig.keys.map((key) => $container.attr(key));
-
+    const container = $iframePage(`[id="${iframeConfig.cid}"]`).first();
+    const tokenParts = iframeConfig.keys.map((key) => container.attr(key));
     if (tokenParts.some((part) => !part)) {
       throw new Error('Javguru realSrc token was not found');
     }
-
     const token = tokenParts.join('').split('').reverse().join('');
-    const videoPageUrl = `${iframePageConfig.base}?${iframePageConfig.rtype}r=${token}`;
-
-    // console.log('[Javguru] Resolved realSrc URL:', videoPageUrl);
-
-    const playerHtml = await this.fetchHtml(videoPageUrl);
-    const m3u8Url = parsePackedPlayerFileUrl(playerHtml);
-
-    if (!m3u8Url || !/\.m3u8(?:$|[?#])/i.test(m3u8Url)) {
-      throw new Error('Javguru HLS playlist URL was not found in player HTML');
-    }
-
-    const normalizedM3u8Url = normalizeM3u8Url(m3u8Url);
-    // console.log('[Javguru] Resolved m3u8 URL:', normalizedM3u8Url);
-
-    const videoSources = [
-      {
-        url: new URL(normalizedM3u8Url, videoPageUrl).toString(),
-        type: 'application/vnd.apple.mpegurl',
-        name: 'HLS',
-      },
-    ];
-
-    const metaResponse = new meta.MetaResponse(id, Provider.TYPE, title, {
-      description: description,
-      poster: poster,
-      background: poster,
-      genres: genres,
-      genre: genres,
-      links,
-      videoPageUrl: normalizedM3u8Url,
+    const videoPageUrl = `${iframeConfig.base}?${iframeConfig.rtype}r=${token}`;
+    const playerHtml = await this.fetchHtml(videoPageUrl, {
+      referer: iframeUrl,
+      redirectReferer: `${this.baseUrl}/`,
     });
-
+    const m3u8Url = parsePackedPlayerFileUrl(playerHtml);
+    if (!m3u8Url) {
+      throw new Error('Javguru HLS playlist URL was not found');
+    }
+    const genres = tagElements.map(({ name }) => name);
+    const metaResponse = new meta.MetaResponse(id, Provider.TYPE, title, {
+      description:
+        posterElement.attr('alt')?.trim() || metaMap['og:description'] || title,
+      poster,
+      background: poster,
+      genres,
+      genre: genres,
+      links: this.getMetaGenreLinks('javguru', tagElements),
+      videoPageUrl: m3u8Url,
+    });
     return {
       metaResponse,
-      videoPageUrl,
-      videoSources,
+      videoPageUrl: m3u8Url,
+      videoSources: [
+        {
+          url: new URL(m3u8Url, videoPageUrl).toString(),
+          type: 'application/vnd.apple.mpegurl',
+          name: 'STREAM SB',
+        },
+      ],
     };
   }
 
-  async getStreams(videoPage) {
-    const videoSources = Array.isArray(videoPage.videoSources)
-      ? videoPage.videoSources
-      : [];
-    const hlsSource = videoSources.find(
+  async processStreams({ id }) {
+    const html = await this.fetchHtml(id);
+    const videoPage = await this.parseVideoPage({ id, html });
+    const hlsSource = videoPage.videoSources.find(
       (source) =>
-        /mpegurl|m3u8/i.test(source.type) ||
-        /\.m3u8(?:$|[?#])/i.test(source.url),
+        /\.m3u8(?:$|[?#])/i.test(source.url) || /mpegurl/i.test(source.type),
     );
-    const mp4Sources = videoSources.filter((source) =>
-      /video\/mp4/i.test(source.type),
-    );
-
-    if (!hlsSource && !mp4Sources.length) {
+    if (!hlsSource) {
       return super.getStreams(videoPage);
     }
-
-    const referer =
-      videoPage.metaResponse && videoPage.metaResponse.id
-        ? videoPage.metaResponse.id
-        : this.baseUrl;
-    const behaviorHints = {
-      proxyHeaders: {
-        request: {
-          Origin: new URL(referer).origin,
-          Referer: referer,
-        },
-      },
-    };
-    const streams = [];
-    if (hlsSource) {
-      // const hlsOrigin = new URL(hlsSource.url).origin.replace(/^(https?:\/\/)s\d+\./, '$1');
-      streams.push({
-        type: Provider.TYPE,
-        url: await getProxiedUrl(
-          hlsSource.url,
-          behaviorHints.proxyHeaders.request,
-        ),
-        name: hlsSource.name || 'HLS',
-      });
-    }
-
-    const mp4Streams = await Promise.all(
-      mp4Sources.map(async (source) => {
-        const sourceUrl = new URL(source.url);
-        const isPlayback = sourceUrl.origin === new URL(this.baseUrl).origin;
-        const requestHeaders = {
-          ...behaviorHints.proxyHeaders.request,
-          ...(isPlayback ? { Referer: `${this.baseUrl}/` } : {}),
-        };
-        return {
+    const streamUrl = await getProxiedUrl(hlsSource.url, {
+      Referer: hlsSource.url,
+    });
+    return {
+      streams: [
+        {
           type: Provider.TYPE,
-          url: await getProxiedUrl(source.url, requestHeaders),
-          name: source.name,
-        };
-      }),
-    );
-
-    streams.push(...mp4Streams);
-
-    return { streams };
+          url: streamUrl,
+          name: 'STREAM SB',
+        },
+      ],
+    };
   }
 
   transformStream(url, stream) {
@@ -434,4 +359,6 @@ class JavguruProvider extends Provider {
 }
 
 module.exports = JavguruProvider.create;
-module.exports.normalizeM3u8Url = normalizeM3u8Url;
+module.exports.normalizeM3u8Url = (url) =>
+  url.replace(/^ttps:\/\//i, 'https://');
+module.exports.parsePackedPlayerFileUrl = parsePackedPlayerFileUrl;

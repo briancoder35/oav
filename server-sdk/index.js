@@ -38,7 +38,6 @@ function serveHTTP(addonInterface, opts = {}) {
   }
   const app = express();
   mountHlsProxy(app);
-
   const router = getRouter(addonInterface);
   app.use('/:resource/:type/:id/:extra?.json', (req, res, next) => {
     const { resource, type, id } = req.params;
@@ -62,22 +61,17 @@ function serveHTTP(addonInterface, opts = {}) {
     next();
   });
   app.use(router);
-
-  // serve static dir
   if (opts.static) {
     const location = path.join(process.cwd(), opts.static);
     if (!fs.existsSync(location))
       throw new Error('directory to serve does not exist');
     app.use(opts.static, express.static(location));
   }
-
-  // landing page
   const landingHTML = landingTemplate(addonInterface.manifest);
   app.get('/', (_, res) => {
     res.setHeader('content-type', 'text/html');
     res.end(landingHTML);
   });
-
   const server = app.listen(opts.port);
   server.on('close', clearHlsProxyResources);
   return new Promise(function (resolve, reject) {

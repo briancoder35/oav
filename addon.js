@@ -4,22 +4,16 @@ const packageInfo = require('./package.json');
 const { catalogs } = require('./catalog');
 
 const manifest = {
-  id: 'brian3596.onlyavideo',
+  id: 'brian.onlyavideo',
   version: packageInfo.version,
-
   name: 'OnlyAVideo',
   description: packageInfo.description,
-
   icon: 'https://raw.githubusercontent.com/Mast3rCh1ef/addon-asset/main/op.png',
   background:
     'https://raw.githubusercontent.com/Mast3rCh1ef/addon-asset/main/bg.png',
-
   resources: ['catalog', 'stream', 'meta'],
-
   types: ['movie'],
-
   catalogs,
-
   behaviorHints: {
     adult: true,
   },

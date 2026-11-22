@@ -1,277 +1,213 @@
 const { load } = require('cheerio');
-const logger = require('../logger');
 const { meta } = require('../model');
 const Provider = require('./provider');
+const { getProxiedUrl } = require('./hls-proxy');
+
+const pathMappings = {
+  'Most Popular': '/most-popular/',
+  'Top Rated': '/top-rated/',
+};
 
 class PorntrexProvider extends Provider {
   constructor() {
-    super('https://porntrex.com/', 'porntrex', 85);
+    super('https://www.porntrex.com', 'porntrex', 120);
   }
 
   static create() {
     return new PorntrexProvider();
   }
 
-  getInitialUrl(catalogId) {
-    if (!catalogId) {
-      return `${this.baseUrl}latest-updates/`;
-    }
-
-    if (catalogId.includes('top-rated')) {
-      return `${this.baseUrl}top-rated/`;
-    }
-
-    if (catalogId.includes('most-popular')) {
-      return `${this.baseUrl}most-popular/`;
-    }
-
-    return `${this.baseUrl}latest-updates/`;
+  getInitialUrl() {
+    return new URL('/latest-updates/', this.baseUrl).toString();
   }
 
-  getSegment(catalogId) {
-    return catalogId.substring(this.getName().length + 1);
+  handleSearch({ extra: { search: keyword } }) {
+    return new URL(
+      `/search/${encodeURIComponent(keyword)}/`,
+      this.baseUrl,
+    ).toString();
   }
 
-  handleSearch({ id, extra: { search: keyword } }) {
-    const segment = this.getSegment(id);
-    return `${this.baseUrl}search/${keyword}/${segment}/`;
-  }
-
-  handleGenre(args) {
-    return this.handleSearch({ ...args, extra: { search: args.extra.genre } });
+  handleGenre({ extra: { genre } }) {
+    if (
+      typeof genre === 'string' &&
+      (genre.startsWith('/') || /^[a-z][a-z\d+.-]*:\/\//i.test(genre))
+    ) {
+      return this.getGenreCatalogUrl(genre, pathMappings);
+    }
+    const path = pathMappings[genre] || `/categories/${this.toSlug(genre)}/`;
+    return new URL(path, this.baseUrl).toString();
   }
 
   handlePagination(url, { extra: { skip } }) {
-    const page = Math.floor(skip / this.perPage) + 1;
-
-    if (page <= 1) return url;
-
-    const prefix = url.endsWith('/') ? '' : '/';
-    return `${prefix}${page}/`;
-  }
-
-  extractVideoId(url) {
-    const match = url.match(/\/video\/(\d+)\//);
-    return match ? parseInt(match[1], 10) : null;
-  }
-
-  buildPoster(videoId) {
-    const bucket = Math.floor(videoId / 1000) * 1000;
-    return `https://ptx.cdntrex.com/contents/videos_screenshots/${bucket}/${videoId}/preview.mp4.jpg`;
-  }
-
-  async fetchHtml(url) {
-    return super.fetchHtml(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-
-        Accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-
-        'Accept-Language': 'en-US,en;q=0.9',
-
-        Referer: 'https://www.porntrex.com/',
-
-        Cookie: 'kt_tcookie=1; confirmed=true',
-      },
-    });
-  }
-
-  async resolveStream(url) {
-    try {
-      let res = await fetch(url, {
-        method: 'HEAD',
-        redirect: 'follow',
-        headers: {
-          'User-Agent': 'Mozilla/5.0',
-          Referer: 'https://www.porntrex.com/',
-          Cookie: 'kt_tcookie=1; confirmed=true',
-        },
-      });
-
-      if (!res.url || res.status >= 400) {
-        res = await fetch(url, {
-          method: 'GET',
-          redirect: 'follow',
-          headers: {
-            'User-Agent': 'Mozilla/5.0',
-            Referer: 'https://www.porntrex.com/',
-            Cookie: 'kt_tcookie=1; confirmed=true',
-          },
-        });
-      }
-
-      return res.url;
-    } catch (error) {
-      logger.warn({ err: error, url }, 'Unable to resolve Porntrex stream URL');
-      return null;
+    const skipOffset = Number(skip);
+    if (!Number.isFinite(skipOffset) || skipOffset <= 0) {
+      return '';
     }
+    const pageUrl = new URL(url);
+    const pageSize =
+      pageUrl.pathname.replace(/\/+$/, '') === '/latest-updates'
+        ? 85
+        : this.limit;
+    const pageNumber = Math.floor(skipOffset / pageSize) + 1;
+    pageUrl.pathname = `${pageUrl.pathname.replace(/\/+$/, '')}/${pageNumber}/`;
+    return pageUrl.toString();
   }
 
   getCatalogMetas(html) {
     const metas = [];
     const $ = load(html);
-    const seen = new Set();
-
-    $('div.video-item').each((_, element) => {
+    $('div.video-item').each((index, element) => {
       const $e = $(element);
-      const $a = $e.children('a').first();
+      const $a = $e.children('a');
       const videoPageUrl = $a.attr('href');
-
-      if (!videoPageUrl) return;
-
-      const id = new URL(videoPageUrl, this.baseUrl).href;
-
-      if (seen.has(id)) return;
-
-      seen.add(id);
-
       const $img = $a.children('img');
-      let poster =
-        this.buildPoster(this.extractVideoId(id)) ||
-        $img.attr('data-src') ||
-        $img.attr('data-srcset')?.split(',')[0]?.split(' ')[0] ||
-        $img.attr('src');
-      const title = ($img.attr('alt') || '').replace(/\s+/g, ' ').trim();
-
-      if (poster && poster.startsWith('//')) {
-        poster = 'https:' + poster;
-      }
-
+      const poster = $img.attr('data-src');
+      const title = $img.attr('alt');
       metas.push(
-        new meta.MetaPreview(id, Provider.TYPE, title, poster, {
-          posterShape: 'landscape',
-        }),
+        new meta.MetaPreview(
+          new URL(videoPageUrl, this.baseUrl).toString(),
+          Provider.TYPE,
+          title,
+          poster ? this.resolveUrl(poster) : undefined,
+          { posterShape: 'landscape' },
+        ),
       );
     });
-
     return metas;
   }
 
-  async getMetadata(args) {
-    const html = await this.fetchHtml(args.id);
-    const parsed = await this.parseVideoPage({ id: args.id, html });
-    return parsed.metaResponse;
+  parseVideoPage({ id, html }) {
+    const regex = /var flashvars = (\{[^;]*\});/;
+    let match = html.match(regex);
+    if (match && match[1]) {
+      const {
+        video_title,
+        video_categories,
+        preview_url,
+        video_url,
+        video_url_text,
+        video_alt_url5,
+        video_alt_url4,
+        video_alt_url3,
+        video_alt_url2,
+        video_alt_url,
+        video_alt_url5_text,
+        video_alt_url4_text,
+        video_alt_url3_text,
+        video_alt_url2_text,
+        video_alt_url_text,
+      } = JSON.parse(
+        this.fixLooseJson(
+          match[1].replace('var flashvars =', '').replace(';', '').trim(),
+        ),
+      );
+      const categories = video_categories
+        ? video_categories
+            .split(',')
+            .map((name) => name.trim())
+            .filter(Boolean)
+        : [];
+      const poster = this.resolveUrl(preview_url);
+      const links = this.getMetaGenreLinks(
+        'porntrex',
+        categories.map((name) => ({
+          name,
+          href: new URL(
+            `/categories/${this.toSlug(name)}/`,
+            this.baseUrl,
+          ).toString(),
+        })),
+      );
+      const metaResponse = new meta.MetaResponse(
+        id,
+        Provider.TYPE,
+        video_title,
+        {
+          genres: categories,
+          genre: categories,
+          poster: poster,
+          background: poster,
+          description: video_title,
+          links,
+        },
+      );
+      return {
+        metaResponse,
+        videoPageUrl: id,
+        video_url,
+        video_url_text,
+        video_alt_url5,
+        video_alt_url4,
+        video_alt_url3,
+        video_alt_url2,
+        video_alt_url,
+        video_alt_url5_text,
+        video_alt_url4_text,
+        video_alt_url3_text,
+        video_alt_url2_text,
+        video_alt_url_text,
+      };
+    }
+    return {};
   }
 
-  async parseVideoPage({ id, html }) {
-    const $ = load(html);
-    const title =
-      $('meta[property="og:title"]').attr('content') ||
-      $('title').text().trim();
-    const description = $('meta[name="description"]').attr('content') || title;
-    const videoId = this.extractVideoId(id);
-    let poster;
+  async processStreams({ id }) {
+    return this.fetchHtml(id)
+      .then((html) => this.parseVideoPage({ id, html }))
+      .then((meta) => this.getStreams(meta));
+  }
 
-    if (videoId) {
-      poster = this.buildPoster(videoId);
-    } else {
-      poster = $('meta[property="og:image"]').attr('content');
-
-      if (poster && poster.startsWith('//')) {
-        poster = 'https:' + poster;
-      }
-    }
-    const metaResponse = new meta.MetaResponse(id, Provider.TYPE, title, {
-      description,
-      poster,
-      background: poster,
-      posterShape: 'landscape',
-    });
-
-    const playerMatch = html.match(
-      /kt_player\s*\(\s*['"][^'"]+['"]\s*,\s*(\{[\s\S]*?\})\s*\)/,
-    );
-    const streams = [];
-
-    if (playerMatch) {
-      const raw = playerMatch[1];
-      const streamRegex = /video_alt_url(\d*)\s*:\s*'([^']+)'/g;
-      const qualityMap = {
-        '': '480p',
-        2: '720p',
-        3: '1080p',
-        4: '1440p',
-        5: '2160p',
+  async getStreams(meta) {
+    if (meta) {
+      const qualities = [
+        'video_alt_url5',
+        'video_alt_url4',
+        'video_alt_url3',
+        'video_alt_url2',
+        'video_alt_url',
+        'video_url',
+      ];
+      const pageUrl = meta.videoPageUrl || this.baseUrl;
+      const requestHeaders = {
+        Origin: new URL(pageUrl).origin,
+        Referer: pageUrl,
       };
-      let match;
-
-      while ((match = streamRegex.exec(raw)) !== null) {
-        const key = match[1] || '';
-        let url = match[2];
-
-        if (url.startsWith('//')) {
-          url = 'https:' + url;
-        }
-
-        streams.push({
-          url,
-          quality: qualityMap[key] || '480p',
-        });
-      }
+      const streams = await Promise.all(
+        qualities
+          .filter(
+            (key) =>
+              Object.prototype.hasOwnProperty.call(meta, key) && meta[key],
+          )
+          .map(async (key) => {
+            const videoUrl = this.resolveUrl(meta[key]);
+            return {
+              url: await getProxiedUrl(videoUrl, requestHeaders),
+              name: meta[`${key}_text`],
+              type: Provider.TYPE,
+            };
+          }),
+      );
+      return { streams };
     }
+    return { streams: [] };
+  }
 
-    if (!streams.length) {
-      const matches = html.match(/https?:\/\/[^"' ]+\.mp4[^"' ]*/g) || [];
-      const unique = [...new Set(matches)];
-
-      unique.forEach((url) => {
-        const qualityMatch = url.match(/(\d{3,4})p/);
-        let quality;
-
-        if (qualityMatch) {
-          quality = qualityMatch[1] + 'p';
-        } else if (url.includes('.mp4')) {
-          quality = '480p';
-        } else {
-          quality = 'HD';
-        }
-
-        streams.push({
-          url,
-          quality,
-        });
-      });
+  resolveUrl(url) {
+    if (!url) {
+      return undefined;
     }
-
-    if (!streams.length) {
-      return { metaResponse };
+    if (url.startsWith('//')) {
+      return `https:${url}`;
     }
+    return new URL(url, this.baseUrl).toString();
+  }
 
-    const seenUrls = new Set();
-    const uniqueStreams = streams
-      .filter((s) => {
-        if (seenUrls.has(s.url)) return false;
-        seenUrls.add(s.url);
-        return true;
-      })
-      .sort((a, b) => {
-        const qa = Number(a.quality.replace('p', '')) || 0;
-        const qb = Number(b.quality.replace('p', '')) || 0;
-        return qb - qa;
-      });
-    const resolvedStreams = await Promise.all(
-      uniqueStreams.map(async (s) => {
-        const finalUrl = await this.resolveStream(s.url);
-
-        if (!finalUrl) return null;
-
-        return {
-          type: Provider.TYPE,
-          url: finalUrl,
-          name: s.quality,
-          behaviorHints: {
-            notWebReady: false,
-          },
-        };
-      }),
-    );
-
-    return {
-      metaResponse,
-      streams: resolvedStreams.filter(Boolean),
-    };
+  fixLooseJson(looseJsonString) {
+    let jsonString = looseJsonString.trim().replace(/^"(.*)"$/, '$1');
+    jsonString = jsonString.replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":');
+    jsonString = jsonString.replace(/'/g, '"');
+    return jsonString;
   }
 }
 

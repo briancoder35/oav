@@ -14,7 +14,7 @@ class Provider {
   static LIMIT = 50;
   static TYPE = 'movie';
   static TRANSPORT_URL =
-    'https://7aa0680f21e4-onlyavideo.baby-beamup.club/manifest.json';
+    'https://92f86c263599-oav.baby-beamup.club/manifest.json';
 
   constructor(baseUrl, name, limit) {
     this.baseUrl = baseUrl;
@@ -41,12 +41,10 @@ class Provider {
     if (typeof genre !== 'string') {
       throw new Error(`Unsupported ${this.getName()} genre: ${genre}`);
     }
-
     const mappedPath = pathMappings[genre];
     if (mappedPath) {
       return new URL(mappedPath, this.baseUrl).toString();
     }
-
     let genreUrl;
     try {
       genreUrl = genre.startsWith('/')
@@ -61,6 +59,14 @@ class Provider {
     return genreUrl.toString();
   }
 
+  toSlug(value) {
+    return String(value)
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/&/g, '')
+      .replace(/[^a-z0-9-]/g, '');
+  }
+
   activate(catalogId) {
     return catalogId.indexOf(this.getName()) !== -1;
   }
@@ -73,30 +79,39 @@ class Provider {
     return new Provider('', 'default');
   }
 
-  async fetchHtml(url) {
-    logger.info('fetching url', url);
-
+  async fetchHtml(url, options = {}) {
+    logger.info({ url }, 'fetching Url');
     const cached = cache.get(url);
     if (cached && Date.now() - cached.time < 5000) {
       return cached.data;
     }
-
     if (pending.has(url)) {
       return pending.get(url);
     }
-
     const request = client
       .get(url, {
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36',
           Accept:
+            options.accept ||
             'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
-          Referer: this.baseUrl,
-          Origin: this.baseUrl,
+          Referer: options.referer || this.baseUrl,
+          ...(options.origin ? { Origin: options.origin } : {}),
           Connection: 'keep-alive',
+          Credentials: 'include',
         },
+        ...(options.redirectReferer
+          ? {
+              beforeRedirect: (redirectOptions) => {
+                redirectOptions.headers = {
+                  ...redirectOptions.headers,
+                  Referer: options.redirectReferer,
+                };
+              },
+            }
+          : {}),
         timeout: 15000,
       })
       .then((response) => {
@@ -109,16 +124,15 @@ class Provider {
       })
       .catch((error) => {
         pending.delete(url);
-        logger.error(error);
+        logger.error('fetchHtml error', error);
         return '';
       });
-
     pending.set(url, request);
-
     return request;
   }
 
   async fetchJson(url) {
+    logger.info({ url }, 'fetching Json');
     try {
       const response = await client.get(url, {
         headers: {
@@ -129,7 +143,6 @@ class Provider {
         },
         timeout: 15000,
       });
-
       return response.data;
     } catch (error) {
       logger.error('fetchJson error', error);
@@ -139,7 +152,6 @@ class Provider {
 
   cleanUrl(url) {
     if (!url) return url;
-
     return url
       .replace(/\\\//g, '/')
       .replace(/\\u0026/g, '&')
@@ -192,28 +204,23 @@ class Provider {
           url = this.handleGenre(args);
         }
       }
-
       if (args.extra.skip) {
         const paginated = this.handlePagination(url, args);
-
         if (paginated.startsWith('http')) {
           url = paginated;
         } else {
           url += paginated;
         }
       }
-
       if (url.match(/https?:\/\/.*https?:\/\//)) {
-        logger.error('❌ Broken URL detected:', url);
+        logger.error('Broken URL detected:', url);
         return { metas: [] };
       }
-
       const html = await this.fetchHtml(url);
       const metas = await this.getCatalogMetas(html);
       logger.debug({ metasSize: metas.length }, 'catalog');
       return { metas };
     }
-
     return { metas: [] };
   }
 
@@ -223,7 +230,6 @@ class Provider {
         return { meta };
       });
     }
-
     return { meta: {} };
   }
 
@@ -233,11 +239,9 @@ class Provider {
     const result = await this.fetchHtml(id).then((html) =>
       this.parseVideoPage({ id, html }),
     );
-
     if (result && result.metaResponse) {
       return result.metaResponse;
     }
-
     return result;
   }
 
@@ -256,7 +260,6 @@ class Provider {
     if (hls) {
       return this.getStreams({ videoPageUrl: this.cleanUrl(hls[0]) });
     }
-
     const dash = html.match(/https?:\/\/[^\s"'<>]+\.mpd[^\s"'<>]*/i);
     if (dash) {
       return {
@@ -269,35 +272,27 @@ class Provider {
         ],
       };
     }
-
     const meta = await this.parseVideoPage({ id, html });
-
     if (meta.streams && meta.streams.length) {
       return { streams: meta.streams };
     }
-
     if (meta.videoPageUrl && meta.videoPageUrl.includes('/embed/')) {
       const embedHtml = await this.fetchHtml(meta.videoPageUrl);
       const m3u8 = embedHtml.match(
         /(?:https?:)?\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i,
       );
-
       if (m3u8) {
         let url = m3u8[0];
         if (url.startsWith('//')) {
           url = 'https:' + url;
         }
-
         meta.videoPageUrl = this.cleanUrl(url);
       }
     }
-
     const result = await this.getStreams(meta);
-
     if (result.streams && result.streams.length) {
       return result;
     }
-
     const mp4 = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/i);
     if (mp4) {
       return {
@@ -313,7 +308,6 @@ class Provider {
         ],
       };
     }
-
     return { streams: [] };
   }
 
@@ -321,7 +315,6 @@ class Provider {
     if (!meta.videoPageUrl) {
       return { streams: [] };
     }
-
     if (/\.mp4(\?|$)/i.test(meta.videoPageUrl)) {
       return Promise.resolve({
         streams: [
@@ -333,13 +326,11 @@ class Provider {
         ],
       });
     }
-
     return this.fetchHtml(meta.videoPageUrl)
       .then((content) => {
         if (content.includes('#EXTM3U')) {
           return this.parseM3u8(content);
         }
-
         return [];
       })
       .then((streams) =>
@@ -352,13 +343,10 @@ class Provider {
 
   transformStream(baseUrl, stream) {
     if (!stream.url) return stream;
-
     if (stream.url.startsWith('http')) {
       return stream;
     }
-
     const base = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
-
     return {
       ...stream,
       url: base + stream.url,

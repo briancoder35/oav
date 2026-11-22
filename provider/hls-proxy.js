@@ -17,7 +17,6 @@ let proxyOrigin;
 function isPrivateAddress(address) {
   const normalized = address.replace(/^\[|\]$/g, '').toLowerCase();
   const family = net.isIP(normalized);
-
   if (family === 4) {
     const octets = normalized.split('.').map(Number);
     const [first, second] = octets;
@@ -32,7 +31,6 @@ function isPrivateAddress(address) {
       first >= 224
     );
   }
-
   if (family === 6) {
     if (normalized.startsWith('::ffff:')) {
       return true;
@@ -48,7 +46,6 @@ function isPrivateAddress(address) {
       normalized.startsWith('feb')
     );
   }
-
   return false;
 }
 
@@ -86,7 +83,6 @@ function registerResource(url, headers) {
   if (resources.size >= MAX_RESOURCES) {
     throw new Error('HLS proxy resource limit reached');
   }
-
   const token = randomBytes(24).toString('hex');
   resources.set(token, {
     url: upstreamUrl.toString(),
@@ -100,9 +96,22 @@ function clearHlsProxyResources() {
   resources.clear();
 }
 
-function rewriteManifest(content, manifestUrl, headers) {
+function rewriteManifest(content, manifestUrl) {
+  const parsedManifestUrl = new URL(manifestUrl);
+  const manifestOrigin = parsedManifestUrl.origin;
+  const childHeaders = manifestOrigin.includes('javclan.com')
+    ? {
+        Referer: parsedManifestUrl.pathname.includes('/index-f')
+          ? parsedManifestUrl
+              .toString()
+              .replace(/\/[^/]+\.m3u8$/, '/master.m3u8')
+          : parsedManifestUrl.toString(),
+      }
+    : {
+        Referer: manifestUrl,
+      };
   const rewriteUri = (uri) =>
-    registerResource(new URL(uri, manifestUrl).toString(), headers);
+    registerResource(new URL(uri, manifestUrl).toString(), childHeaders);
   return content
     .split(/\r?\n/)
     .map((line) => {
@@ -163,7 +172,13 @@ function getResourceToken(requestUrl) {
 
 async function fetchUpstream(resource, request, signal) {
   const headers = { ...resource.headers };
-  headers['accept-encoding'] = 'identity';
+  headers.accept = headers.accept || '*/*';
+  headers['accept-encoding'] =
+    headers['accept-encoding'] || 'gzip, deflate, br';
+  headers['accept-language'] = headers['accept-language'] || 'en-US,en;q=0.9';
+  headers['user-agent'] =
+    headers['user-agent'] ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36';
   for (const name of [
     'accept',
     'if-modified-since',
@@ -177,8 +192,15 @@ async function fetchUpstream(resource, request, signal) {
       headers[name] = value;
     }
   }
-
   let url = validateUpstreamUrl(resource.url);
+  if (/\/(?:master|index-[^/]+)\.m3u8$/i.test(url.pathname)) {
+    headers.accept = '*/*';
+    headers['accept-encoding'] = 'gzip';
+    headers.priority = 'u=3, i';
+    headers['sec-fetch-dest'] = 'video';
+    headers['sec-fetch-mode'] = 'no-cors';
+    headers['sec-fetch-site'] = 'same-origin';
+  }
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     const response = await fetch(url, {
       method: request.method === 'HEAD' ? 'HEAD' : 'GET',
@@ -196,7 +218,6 @@ async function fetchUpstream(resource, request, signal) {
     }
     url = validateUpstreamUrl(new URL(location, url).toString());
   }
-
   throw new Error('Unable to fetch HLS resource');
 }
 
@@ -210,7 +231,6 @@ async function handleProxyRequest(request, response) {
     response.writeHead(405, { Allow: 'GET, HEAD, OPTIONS' }).end();
     return;
   }
-
   const token = getResourceToken(request.url);
   const resource = token && resources.get(token);
   if (!resource || resource.expiresAt <= Date.now()) {
@@ -220,14 +240,12 @@ async function handleProxyRequest(request, response) {
     response.writeHead(404).end('HLS resource not found');
     return;
   }
-
   const abortController = new AbortController();
   response.on('close', () => {
     if (!response.writableEnded) {
       abortController.abort();
     }
   });
-
   try {
     const { response: upstream, url } = await fetchUpstream(
       resource,
@@ -241,7 +259,6 @@ async function handleProxyRequest(request, response) {
       response.end();
       return;
     }
-
     const contentType = upstream.headers.get('content-type') || '';
     const isManifest =
       /\.m3u8$/i.test(url.pathname) || /mpegurl/i.test(contentType);
@@ -262,7 +279,9 @@ async function handleProxyRequest(request, response) {
       response.end(manifest);
       return;
     }
-
+    if (/\.css$/i.test(url.pathname) && upstream.ok) {
+      response.setHeader('Content-Type', 'video/mp2t');
+    }
     await pipeline(Readable.fromWeb(upstream.body), response);
   } catch (error) {
     if (response.destroyed) {
@@ -284,7 +303,6 @@ function startHlsProxy() {
   if (startPromise) {
     return startPromise;
   }
-
   server = http.createServer((request, response) => {
     handleProxyRequest(request, response);
   });

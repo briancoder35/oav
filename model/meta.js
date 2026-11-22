@@ -45,9 +45,7 @@ class MetaPreview {
 class MetaConverter {
   static metaResponseToPreview(metaResponse) {
     const { id, type, name, poster, genres, links, description } = metaResponse;
-
     const posterShape = metaResponse.posterShape || 'poster';
-
     return new MetaPreview(id, type, name, poster, {
       posterShape,
       genres,
@@ -55,7 +53,6 @@ class MetaConverter {
       description,
     });
   }
-
   static metaPreviewToResponse(metaPreview) {
     const {
       id,
@@ -69,7 +66,6 @@ class MetaConverter {
       videoPageUrl,
       picId,
     } = metaPreview;
-
     return new MetaResponse(id, type, name, {
       poster,
       posterShape,

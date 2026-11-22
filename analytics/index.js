@@ -18,7 +18,6 @@ function track(event, properties) {
   if (!analytics) {
     return;
   }
-
   (async () => {
     let geo = {};
     try {
@@ -30,7 +29,6 @@ function track(event, properties) {
       geo = {};
       console.warn(err);
     }
-
     analytics.track({
       anonymousId: Math.random().toString(16).replace('0.', ''),
       event,

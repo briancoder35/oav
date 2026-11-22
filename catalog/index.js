@@ -1,6 +1,6 @@
 const { catalogs: epornerCatalogs } = require('./eporner');
 const xhamsterCatalogs = require('./xhamster');
-const porntrexCatalogs = require('./porntrex');
+const porntrexCatalogs = require('./porntrex.json');
 const xvideosCatalog = require('./xvideos.json');
 const xnxxCatalog = require('./xnxx.json');
 const javtifulCatalog = require('./javtiful.json');

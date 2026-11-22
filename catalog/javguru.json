@@ -11,12 +11,12 @@
       "name": "genre",
       "options": [
         "New release",
+        "Popular Month",
         "Decensored",
         "Amateur",
         "Idol",
         "FC2",
-        "4K",
-        "Popular Month"
+        "4K"
       ]
     },
     {

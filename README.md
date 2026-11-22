@@ -17,7 +17,3 @@ You need `yarn`
 [testing.md#testing-in-stremio-app](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/testing.md#testing-in-stremio-app)
 
 https://github.com/Stremio/stremio-addon-sdk
-
-## Local media proxy
-
-The media proxy is served from the addon's HTTP server at `/hls-proxy`. It handles Javtiful HLS and MP4 streams, plus Javtiful and Javguru catalog posters, so proxied URLs remain reachable both locally and through the deployed addon host.
